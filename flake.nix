@@ -8,6 +8,8 @@
     shFlake.inputs.nixpkgs.follows = "nixpkgs";
     pyFlake.url = "path:./py";
     pyFlake.inputs.nixpkgs.follows = "nixpkgs";
+    rsFlake.url ="path:./rs";
+    rsFlake.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -16,6 +18,7 @@
       nixpkgs,
       shFlake,
       pyFlake,
+      rsFlake,
     }:
     let
       systems = [
@@ -47,7 +50,8 @@
           # Executed by `nix build .#<name>` (. for default)
           packages = {
             default = help-script;
-          };
+          }
+          // rsFlake.packages.${system};
 
           # Executed by `nix run .#<name>` (. for default)
           apps = {
@@ -56,8 +60,9 @@
               program = "${help-script}/bin/help";
             };
           }
-          // shFlake.apps.${system}
-          // pyFlake.apps.${system};
+          // rsFlake.apps.${system}
+          // pyFlake.apps.${system}
+          // shFlake.apps.${system};
 
           # Executed by `nix develop .#<name>` (. for default)
           devShells =
@@ -72,8 +77,9 @@
               default = nixShell;
               nix = nixShell;
             }
-            // shFlake.devShells.${system}
-            // pyFlake.devShells.${system};
+            // rsFlake.devShells.${system}
+            // pyFlake.devShells.${system}
+            // shFlake.devShells.${system};
         };
     in
     {

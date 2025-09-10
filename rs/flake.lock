@@ -32,46 +32,11 @@
         "type": "github"
       }
     },
-    "pyFlake": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "path": "./py",
-        "type": "path"
-      },
-      "original": {
-        "path": "./py",
-        "type": "path"
-      },
-      "parent": []
-    },
     "root": {
       "inputs": {
         "nixpkgs": "nixpkgs",
-        "pyFlake": "pyFlake",
-        "rsFlake": "rsFlake",
-        "shFlake": "shFlake"
-      }
-    },
-    "rsFlake": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ],
         "rust-overlay": "rust-overlay"
-      },
-      "locked": {
-        "path": "./rs",
-        "type": "path"
-      },
-      "original": {
-        "path": "./rs",
-        "type": "path"
-      },
-      "parent": []
+      }
     },
     "rust-overlay": {
       "inputs": {
@@ -90,22 +55,6 @@
         "repo": "rust-overlay",
         "type": "github"
       }
-    },
-    "shFlake": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "path": "./sh",
-        "type": "path"
-      },
-      "original": {
-        "path": "./sh",
-        "type": "path"
-      },
-      "parent": []
     }
   },
   "root": "root",
