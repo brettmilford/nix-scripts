@@ -10,6 +10,8 @@
     pyFlake.inputs.nixpkgs.follows = "nixpkgs";
     rsFlake.url ="path:./rs";
     rsFlake.inputs.nixpkgs.follows = "nixpkgs";
+    cFlake.url ="path:./c";
+    cFlake.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -19,6 +21,7 @@
       shFlake,
       pyFlake,
       rsFlake,
+      cFlake,
     }:
     let
       systems = [
@@ -62,7 +65,8 @@
           }
           // rsFlake.apps.${system}
           // pyFlake.apps.${system}
-          // shFlake.apps.${system};
+          // shFlake.apps.${system}
+          // cFlake.apps.${system};
 
           # Executed by `nix develop .#<name>` (. for default)
           devShells =
@@ -79,7 +83,8 @@
             }
             // rsFlake.devShells.${system}
             // pyFlake.devShells.${system}
-            // shFlake.devShells.${system};
+            // shFlake.devShells.${system}
+            // cFlake.devShells.${system};
         };
     in
     {

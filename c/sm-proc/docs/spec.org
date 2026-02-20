@@ -1,0 +1,1511 @@
+* Statement Processor - Comprehensive Technical Specification
+
+** 1. Project Overview
+
+*Application Name:* =statement-processor=
+
+*Purpose:* A C application that downloads bank statement data from Paperless-ngx via its REST API, extracts transaction lines from statement content, categorizes transactions, and compiles them into an XLSX spreadsheet for expense reporting.
+
+*Language:* C
+
+*Build System:* CMake (via Nix flake)
+
+---
+
+** 2. Dependencies
+
+*** Core Libraries
+- *libcurl* - HTTP client for Paperless API communication
+- *libxlsxwriter* - XLSX file generation
+- *libconfig* - Configuration file parsing
+- *cjson* - JSON parsing for API responses
+- *PCRE2* - Regex engine for transaction categorization and parsing
+
+*** Build Tools
+- CMake (≥3.20)
+- pkg-config
+- Standard C compiler (GCC/Clang)
+
+---
+
+** 3. Architecture
+
+*** 3.1 Application Structure
+Single executable application with modular internal structure:
+
+#+begin_src 
+statement-processor/
+├── src/
+│   ├── main.c                 # Entry point, CLI parsing
+│   ├── config.c/h             # Configuration file handling
+│   ├── paperless_api.c/h      # Paperless API client
+│   ├── parsers/
+│   │   ├── parser.h           # Parser interface
+│   │   ├── cba_parser.c/h     # Commonwealth Bank parser
+│   │   ├── anz_parser.c/h     # ANZ parser
+│   │   └── parser_registry.c/h # Parser selection logic
+│   ├── categorizer.c/h        # Transaction categorization
+│   ├── xlsx_writer.c/h        # XLSX generation
+│   ├── transaction.c/h        # Transaction data structures
+│   └── utils.c/h              # Logging, string utilities
+├── tests/
+│   └── (unit tests for each module)
+├── examples/
+│   └── sm-proc.cfg # Example configuration
+└── CMakeLists.txt
+#+end_src
+
+---
+
+** 4. Configuration
+
+*** 4.1 Environment Variables
+- *=PAPERLESS_URL=* (required) - Base URL of Paperless instance (e.g., =https://paperless.example.com=)
+- *=PAPERLESS_API_KEY=* (required) - API authentication token
+
+*** 4.2 Configuration File Format (libconfig)
+
+*Location:* Specified via =-c= flag
+
+*Format:*
+#+begin_src c
+# Default category for uncategorized transactions
+default_category = "Uncategorized";
+
+# Categorization rules (first match wins)
+categories = (
+  { pattern = "GROCERY|SUPERMARKET|COLES|WOOLWORTHS|IGA"; category = "Groceries"; },
+  { pattern = "RESTAURANT|CAFE|DINING|UBER EATS"; category = "Dining"; },
+  { pattern = "FUEL|PETROL|BP|SHELL|CALTEX"; category = "Transport"; },
+  { pattern = "ELECTRICITY|GAS|WATER|INTERNET|PHONE"; category = "Utilities"; }
+);
+#+end_src
+
+*Behavior:*
+- Configuration file is optional
+- If not provided or not found, all transactions get default category "Uncategorized"
+- Regex patterns are case-insensitive
+- First matching pattern wins
+- Patterns match against transaction Description field only
+
+*** 4.3 Hardcoded Configuration
+
+#+begin_src c
+// Paperless tag IDs
+#define TAG_ACCOUNTS_ID 123        // "Accounts" tag
+#define TAG_PROCESSED_ID 456       // "processed" tag
+
+// Paperless custom field ID
+#define FIELD_EXPENSE_REPORT_ID 789 // "Expense Report" field
+
+// API configuration
+#define API_TIMEOUT_SECONDS 30
+#define API_MAX_RETRIES 3
+#define API_RETRY_BACKOFF_MS 1000  // Initial backoff, doubles each retry
+
+// Date format
+#define DATE_FORMAT_ISO "%Y-%m-%d"
+#+end_src
+
+---
+
+** 5. Command-Line Interface
+
+*** 5.1 Usage
+#+begin_src bash
+statement-processor --date-from <YYYY-MM-DD> --date-to <YYYY-MM-DD> [-c <config>] [-o <output_dir>] [--reprocess]
+#+end_src
+
+*** 5.2 Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| =--date-from= | Yes | Start date (ISO format: YYYY-MM-DD, inclusive) |
+| =--date-to= | Yes | End date (ISO format: YYYY-MM-DD, inclusive) |
+| =-c <path>= | No | Path to configuration file |
+| =-o <path>= | No | Output directory (default: current directory) |
+| =--reprocess= | No | Include documents already tagged as "processed" |
+
+*** 5.3 Examples
+#+begin_src bash
+# Basic usage with config
+nix run ./c#statement-processor -- --date-from 2024-01-01 --date-to 2024-01-31 -c sm-proc.cfg
+
+# Without config (all transactions uncategorized)
+nix run ./c#statement-processor -- --date-from 2024-01-01 --date-to 2024-01-31
+
+# Custom output directory
+nix run ./c#statement-processor -- --date-from 2024-01-01 --date-to 2024-01-31 -o ~/reports/
+
+# Reprocess already processed documents
+nix run ./c#statement-processor -- --date-from 2024-01-01 --date-to 2024-01-31 --reprocess
+#+end_src
+
+---
+
+** 6. Paperless API Integration
+
+*** 6.1 API Endpoints
+
+**** Query Documents
+#+begin_src 
+GET /api/documents/?tags__id__all={TAG_ACCOUNTS_ID}&created__date__gte={date_from}&created__date__lte={date_to}[&tags__id__all__exclude={TAG_PROCESSED_ID}]
+#+end_src
+
+*Parameters:*
+- =tags__id__all={TAG_ACCOUNTS_ID}= - Filter by "Accounts" tag
+- =created__date__gte={date_from}= - Documents created on or after date
+- =created__date__lte={date_to}= - Documents created on or before date
+- =tags__id__all__exclude={TAG_PROCESSED_ID}= - Exclude processed documents (omit if =--reprocess= flag set)
+- =page=N= - Handle pagination (fetch all pages)
+
+*Response Fields Used:*
+- =id= - Document ID
+- =correspondent= - Institution name (may be null)
+- =content= - Full text content extracted from PDF
+- =created= - Document date (YYYY-MM-DD format)
+
+**** Update Document
+#+begin_src 
+PATCH /api/documents/{id}/
+#+end_src
+
+*Request Body (JSON):*
+#+begin_src json
+{
+  "tags": [TAG_ACCOUNTS_ID, TAG_PROCESSED_ID],
+  "custom_fields": [
+    {
+      "field": FIELD_EXPENSE_REPORT_ID,
+      "value": "2024-01-01-2024-01-31"
+    }
+  ]
+}
+#+end_src
+
+*** 6.2 Authentication
+All requests must include header:
+#+begin_src 
+Authorization: Token {PAPERLESS_API_KEY}
+#+end_src
+
+*** 6.3 Error Handling
+
+*Retry Logic:*
+- Retry up to 3 times for network/transient errors (HTTP 5xx, timeouts, connection failures)
+- Use exponential backoff: 1s, 2s, 4s
+- Log each retry attempt
+
+*Non-Retryable Errors:*
+- HTTP 401/403 (authentication/authorization) - fail immediately
+- HTTP 404 (resource not found) - fail immediately
+- HTTP 400 (bad request) - fail immediately
+
+*Pagination:*
+- Follow =next= links in API responses until null
+- Collect all matching documents before processing
+
+---
+
+** 7. Statement Parsing
+
+*** 7.1 Parser Architecture
+
+**** Parser Interface
+#+begin_src c
+typedef struct {
+    char *date;           // ISO format YYYY-MM-DD
+    char *description;    // Full transaction description
+    double debit;         // 0.0 if credit transaction
+    double credit;        // 0.0 if debit transaction
+} Transaction;
+
+typedef struct {
+    char *account_number;
+    char *statement_period;  // For year resolution (CBA)
+    Transaction *transactions;
+    size_t transaction_count;
+} ParseResult;
+
+typedef ParseResult* (*ParserFunc)(const char *content, const char *correspondent);
+#+end_src
+
+**** Parser Registry
+#+begin_src c
+typedef struct {
+    const char *correspondent_name;
+    ParserFunc parser;
+} ParserEntry;
+
+ParserEntry parser_registry[] = {
+    {"CBA", parse_cba_statement},
+    {"Commonwealth Bank", parse_cba_statement},
+    {"ANZ", parse_anz_statement},
+    {NULL, NULL}
+};
+#+end_src
+
+*** 7.2 Institution-Specific Parsers
+
+**** 7.2.1 CBA (Commonwealth Bank) Parser
+
+*Header Extraction:*
+#+begin_src 
+Pattern: "Account Number" followed by account number
+Example: "Account Number 06 4144 10181166"
+Extract: "06 4144 10181166"
+
+Pattern: "Statement Period" for year context
+Example: "Statement Period 1 Nov 2018 - 30 Apr 2019"
+Extract: Start/end dates for year resolution
+#+end_src
+
+*Transaction Pattern:*
+#+begin_src 
+Line format:
+<date> <description>
+[Card xxXXXX]
+[Value Date: DD/MM/YYYY]
+<amount> ( or $ <balance> CR
+
+Examples:
+"02 Nov TASTE BAGUETTE CLAYTON AUS
+Card xx5571
+Value Date: 29/10/2018 3.50 $ $3,673.24 CR"
+
+"02 Nov Transfer to other Bank NetBank
+AccountantInv 179.00 ( $3,425.82 CR"
+#+end_src
+
+*Parsing Logic:*
+1. Extract account number from header
+2. Extract statement period for year context
+3. Identify transaction blocks (start with date pattern "DD MMM")
+4. Combine multi-line transactions:
+   - Main line: date + description
+   - Card line (if present): append to description
+   - Value Date line (if present): append to description
+5. Parse amount:
+   - =(= suffix = debit
+   - =$= prefix = credit
+   - Strip commas, currency symbols
+6. Resolve year from statement period:
+   - If month < statement start month, use end year
+   - Otherwise use start year
+7. Normalize date to ISO format
+
+*Date Resolution Example:*
+#+begin_src 
+Statement Period: 1 Nov 2018 - 30 Apr 2019
+Transaction: "02 Nov" -> 2018-11-02
+Transaction: "15 Jan" -> 2019-01-15 (crosses year boundary)
+Transaction: "28 Apr" -> 2019-04-28
+#+end_src
+
+**** 7.2.2 ANZ Parser
+
+*Header Extraction:*
+#+begin_src 
+Pattern: "ACCOUNT NUMBER:" followed by number
+Example: "ACCOUNT NUMBER: 4564-6801-2076-8402"
+Extract: "4564-6801-2076-8402"
+#+end_src
+
+*Transaction Pattern:*
+#+begin_src 
+Table format:
+Date Processed | Date of Transaction | Card Used | Transaction Details | Amount | Balance
+
+Example:
+"08/12/2025 04/12/2025 8410 AUTO & GENERAL SERVICES TOOWONG $3,705.42CR $2,161.12CR"
+#+end_src
+
+*Parsing Logic:*
+1. Extract account number from header
+2. Identify transaction lines (match date pattern DD/MM/YYYY at start)
+3. Parse fields:
+   - Processed date (column 1): DD/MM/YYYY
+   - Transaction date (column 2): DD/MM/YYYY
+   - Card (column 3): numeric
+   - Description: remaining text before amount
+   - Amount: last field with $ and optional CR
+4. If transaction date ≠ processed date, append transaction date to description
+5. Parse amount:
+   - =CR= suffix = credit
+   - No suffix = debit
+   - Strip commas, currency symbols, =CR=
+6. Normalize processed date to ISO format
+
+*Description Handling:*
+#+begin_src 
+If dates differ:
+"AUTO & GENERAL SERVICES TOOWONG" 
+becomes
+"AUTO & GENERAL SERVICES TOOWONG (Transaction Date: 2025-12-04)"
+#+end_src
+
+*** 7.3 Unknown Institution Handling
+
+When a document's correspondent doesn't match any registered parser:
+1. Log warning: ="Unknown institution: {correspondent_name}, skipping document {document_id}"=
+2. Skip document (don't include in XLSX)
+3. Continue processing remaining documents
+4. Include skip count in summary
+
+*** 7.4 Parse Failure Handling
+
+If a parser encounters content it can't parse:
+1. Log warning: ="Failed to parse document {document_id} ({correspondent}): {reason}"=
+2. Skip document
+3. Continue processing
+4. Include in failure summary
+
+---
+
+** 8. Transaction Categorization
+
+*** 8.1 Categorization Process
+
+*Input:* Transaction description (string)
+*Output:* Category name (string)
+
+*Algorithm:*
+1. Load categorization rules from config (if provided)
+2. For each transaction:
+   - Iterate through category patterns in order
+   - Apply regex (PCRE2) to description (case-insensitive)
+   - First match wins - assign that category
+   - If no match, assign default category
+3. Store category with transaction
+
+*** 8.2 Regex Compilation
+
+*Flags:*
+- =PCRE2_CASELESS= - Case-insensitive matching
+- =PCRE2_UTF= - Support UTF-8 in descriptions
+
+*Error Handling:*
+- If regex compilation fails for a pattern:
+  - Log error with pattern and line number
+  - Skip that pattern
+  - Continue with remaining patterns
+
+*** 8.3 Example Categorization
+
+#+begin_src c
+Description: "COLES SUPERMARKET SPRINGVALE"
+Pattern: "GROCERY|SUPERMARKET|COLES|WOOLWORTHS|IGA"
+Match: "SUPERMARKET" and "COLES"
+Result: Category = "Groceries"
+
+Description: "NETFLIX.COM"
+Pattern: (no match in any pattern)
+Result: Category = "Uncategorized" (default)
+#+end_src
+
+---
+
+** 9. XLSX Generation
+
+*** 9.1 File Naming
+
+*Format:* =exp_report-{date_from}-{date_to}.xlsx=
+
+*Example:* =exp_report-2024-01-01-2024-01-31.xlsx=
+
+*Location:* Output directory specified by =-o= flag (default: current directory)
+
+*Overwrite Behavior:*
+1. Check if file exists
+2. If exists, prompt: ="File {filename} already exists. Overwrite? (y/n): "=
+3. Read user input:
+   - =y= or =Y=: Continue and overwrite
+   - =n= or =N=: Exit with error code 1
+   - Other: Re-prompt
+
+*** 9.2 Worksheet Structure
+
+*Sheet Name:* "Transactions"
+
+*Columns:*
+
+| # | Column Name | Type | Description | Format |
+|---|-------------|------|-------------|--------|
+| 1 | Date | String | Transaction date | YYYY-MM-DD |
+| 2 | Description | String | Full transaction description | Text |
+| 3 | Debit | Number | Debit amount (negative transactions) | 0.00 |
+| 4 | Credit | Number | Credit amount (positive transactions) | 0.00 |
+| 5 | Category | String | Categorized transaction type | Text |
+| 6 | Institution | String | Bank/institution name | Text |
+| 7 | Account | String | Account/card number | Text |
+| 8 | Document URL | String | Link to Paperless document | URL |
+
+*Header Row:*
+- Row 1: Column names
+- Format: Bold text
+
+*Data Rows:*
+- Sorted by Date column (chronological order, oldest first)
+- Dates as ISO strings (YYYY-MM-DD)
+- Debit/Credit as plain numbers (no currency symbols)
+- Empty string for zero amounts (either debit or credit is populated, not both)
+- Document URL format: ={PAPERLESS_URL}/documents/{document_id}=
+
+*** 9.3 Formatting
+
+*Minimal formatting applied:*
+- Header row: Bold
+- Column widths: Auto-sized to fit content
+- Number format: 2 decimal places for Debit/Credit columns
+- All other styling: Default
+
+*** 9.4 Data
+
+*** Finish the specification starting at 9.4 Data.
+
+**/ 9.4 Data Population
+
+/Source:/ All successfully parsed transactions from all processed documents
+
+/Sorting:/
+- Primary sort: Date (ascending - chronological order)
+- Secondary sort: Institution (if dates are equal)
+- Tertiary sort: Description (if dates and institutions are equal)
+
+/Multi-Document Handling:/
+- Combine all transactions from all documents into single sheet
+- No visual separators between documents
+- Documents are effectively "flattened" into transaction list
+
+/Example Row Data:/
+#+begin_src 
+2024-01-15 | COLES SUPERMARKET | 45.50 | | Groceries | CBA | 06 4144 10181166 | https://paperless.example.com/documents/12345
+2024-01-15 | Salary Payment | | 3500.00 | Income | ANZ | 4564-6801-2076-8402 | https://paperless.example.com/documents/12346
+2024-01-16 | NETFLIX.COM | 15.99 | | Uncategorized | CBA | 06 4144 10181166 | https://paperless.example.com/documents/12345
+#+end_src
+
+*/ 9.5 Error Handling
+
+/XLSX Creation Failures:/
+- Disk space errors: Log error, exit with code 1
+- Permission errors: Log error, exit with code 1
+- Library errors: Log error with details, exit with code 1
+
+/Partial Success:/
+- If XLSX creation fails after some documents are processed
+- Do NOT tag any documents as processed
+- Exit with error
+- User can re-run with same parameters (documents still unprocessed)
+
+---
+
+** 10. Paperless Document Tagging
+
+*/ 10.1 Tagging Strategy
+
+/When:/ After successful XLSX file creation only
+
+/Batch Operation:/
+- Collect all successfully processed document IDs
+- Update all documents in sequence
+- If any update fails, log error but continue with remaining documents
+
+*/ 10.2 Update Payload
+
+For each document, send PATCH request:
+
+#+begin_src json
+{
+  "tags": [TAG_ACCOUNTS_ID, TAG_PROCESSED_ID],
+  "custom_fields": [
+    {
+      "field": FIELD_EXPENSE_REPORT_ID,
+      "value": "2024-01-01-2024-01-31"
+    }
+  ]
+}
+#+end_src
+
+/Notes:/
+- Preserve existing "Accounts" tag (TAG_ACCOUNTS_ID)
+- Add "processed" tag (TAG_PROCESSED_ID)
+- Set "Expense Report" custom field value to date range
+
+*/ 10.3 Error Handling
+
+/Per-Document Failures:/
+- Log error: ="Failed to tag document {document_id}: {error_message}"=
+- Continue with remaining documents
+- Include failure count in summary
+
+/Network/Retry:/
+- Apply same retry logic as document fetching (3 retries with backoff)
+- If all retries fail, log error and continue
+
+/Success Tracking:/
+- Track count of successfully tagged documents
+- Track count of failed tag operations
+- Report in summary
+
+---
+
+** 11. Logging and Output
+
+*/ 11.1 Logging Strategy
+
+/Destination:/ stdout/stderr
+- Normal output, progress: stdout
+- Errors, warnings: stderr
+
+/Format:/
+#+begin_src 
+[LEVEL] Message
+#+end_src
+
+/Levels:/
+- =[INFO]= - Progress, status updates
+- =[WARN]= - Non-fatal issues (missing correspondent, parse failures, tag failures)
+- =[ERROR]= - Fatal errors (API failures, file I/O errors)
+
+*/ 11.2 Output Flow
+
+/Startup:/
+#+begin_src 
+[INFO] Statement Processor v1.0.0
+[INFO] Date range: 2024-01-01 to 2024-01-31
+[INFO] Paperless URL: https://paperless.example.com
+[INFO] Configuration: /path/to/sm-proc.cfg
+#+end_src
+
+/Document Query:/
+#+begin_src 
+[INFO] Querying Paperless API...
+[INFO] Found 23 matching documents
+#+end_src
+
+/Processing Progress:/
+#+begin_src 
+[INFO] Processing document 1/23 (ID: 12345, Institution: CBA)
+[INFO] Extracted 15 transactions
+[WARN] Document 2/23 (ID: 12346): Missing correspondent field, using 'Unknown Institution'
+[INFO] Processing document 2/23 (ID: 12346, Institution: Unknown Institution)
+[INFO] Extracted 8 transactions
+[WARN] Document 3/23 (ID: 12347): Unknown institution 'Bank of Queensland', skipping
+[INFO] Processing document 4/23 (ID: 12348, Institution: ANZ)
+[WARN] Failed to parse document 12348 (ANZ): No transactions found
+...
+#+end_src
+
+/XLSX Creation:/
+#+begin_src 
+[INFO] Creating XLSX file: exp_report-2024-01-01-2024-01-31.xlsx
+File exp_report-2024-01-01-2024-01-31.xlsx already exists. Overwrite? (y/n): y
+[INFO] Writing 234 transactions to spreadsheet
+[INFO] XLSX file created successfully
+#+end_src
+
+/Tagging:/
+#+begin_src 
+[INFO] Tagging processed documents in Paperless...
+[INFO] Successfully tagged document 12345
+[INFO] Successfully tagged document 12346
+[WARN] Failed to tag document 12348: HTTP 500 Internal Server Error
+[INFO] Successfully tagged document 12349
+...
+#+end_src
+
+/Summary:/
+#+begin_src 
+[INFO] ========== Summary ==========
+[INFO] Documents queried: 23
+[INFO] Documents processed: 20
+[INFO] Documents skipped: 3
+[INFO]   - Unknown institution: 1
+[INFO]   - Parse failures: 2
+[INFO] Total transactions: 234
+[INFO] XLSX file: exp_report-2024-01-01-2024-01-31.xlsx
+[INFO] Documents tagged: 19/20
+[INFO] Tag failures: 1
+[INFO] ==============================
+#+end_src
+
+/Error Example:/
+#+begin_src 
+[ERROR] Failed to connect to Paperless API: Connection timeout
+[ERROR] Retry 1/3 in 1 second...
+[ERROR] Failed to connect to Paperless API: Connection timeout
+[ERROR] Retry 2/3 in 2 seconds...
+[ERROR] Failed to connect to Paperless API: Connection timeout
+[ERROR] Retry 3/3 in 4 seconds...
+[ERROR] Failed to connect to Paperless API after 3 retries
+[ERROR] Exiting with error code 1
+#+end_src
+
+*/ 11.3 Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success (all operations completed, warnings acceptable) |
+| 1 | Fatal error (API failure, file I/O error, invalid arguments) |
+| 2 | User cancelled (declined file overwrite) |
+
+---
+
+** 12. Error Handling Strategy
+
+*/ 12.1 Error Categories
+
+/Fatal Errors (exit immediately):/
+- Missing required environment variables (PAPERLESS_URL, PAPERLESS_API_KEY)
+- Invalid command-line arguments
+- API authentication failures (HTTP 401/403)
+- API connection failures after retries
+- XLSX file creation failures
+- Invalid configuration file syntax
+
+/Non-Fatal Errors (log and continue):/
+- Missing correspondent field
+- Unknown institution
+- Parse failures for individual documents
+- Tag update failures for individual documents
+- Regex compilation errors in config
+
+*/ 12.2 Recovery Strategy
+
+/Transactional Approach:/
+1. Fetch all documents (with retries)
+2. Parse all documents (skip failures)
+3. Create XLSX file (fail if error)
+4. Tag documents (continue on individual failures)
+
+/Idempotency:/
+- If run fails before XLSX creation: All documents remain unprocessed
+- User can re-run with same parameters
+- If =--reprocess= used: Documents can be reprocessed multiple times
+
+*/ 12.3 Validation
+
+/Startup Validation:/
+- Check environment variables set
+- Validate date format (YYYY-MM-DD)
+- Validate date-from ≤ date-to
+- Check configuration file exists (if specified)
+- Parse and validate configuration file
+- Check output directory exists and is writable
+
+/Runtime Validation:/
+- Validate API responses (JSON structure)
+- Validate document content (not empty)
+- Validate parsed amounts (numeric)
+- Validate parsed dates (valid dates)
+
+---
+
+** 13. Data Structures
+
+*/ 13.1 Core Structures
+
+#+begin_src c
+// Transaction representation
+typedef struct {
+    char *date;           // ISO format YYYY-MM-DD, dynamically allocated
+    char *description;    // Full description, dynamically allocated
+    double debit;         // 0.0 if credit transaction
+    double credit;        // 0.0 if debit transaction
+    char *category;       // Categorization result, dynamically allocated
+} Transaction;
+
+// Document information from Paperless
+typedef struct {
+    int id;
+    char *correspondent;  // May be NULL
+    char *content;        // Full text content
+    char *created_date;   // ISO format YYYY-MM-DD
+} PaperlessDocument;
+
+// Parse result from institution parser
+typedef struct {
+    char *account_number;          // Extracted account number
+    char *statement_period;        // For date resolution (optional)
+    Transaction *transactions;     // Array of transactions
+    size_t transaction_count;      // Number of transactions
+    char *error_message;           // NULL if success, error string if failed
+} ParseResult;
+
+// Configuration
+typedef struct {
+    char *default_category;
+    struct {
+        char *pattern;    // Regex pattern string
+        char *category;   // Category name
+        pcre2_code *compiled_regex;  // Compiled regex
+    } *rules;
+    size_t rule_count;
+} Config;
+
+// Processing statistics
+typedef struct {
+    int documents_queried;
+    int documents_processed;
+    int documents_skipped_unknown;
+    int documents_skipped_parse_error;
+    int documents_skipped_no_correspondent;
+    int total_transactions;
+    int documents_tagged_success;
+    int documents_tagged_failed;
+} ProcessingStats;
+#+end_src
+
+*/ 13.2 Memory Management
+
+/Allocation Strategy:/
+- Use =malloc()= / =calloc()= for dynamic structures
+- Implement cleanup functions for each structure type
+- Free all memory before exit (valgrind clean)
+
+/Cleanup Functions:/
+#+begin_src c
+void free_transaction(Transaction *t);
+void free_parse_result(ParseResult *pr);
+void free_paperless_document(PaperlessDocument *doc);
+void free_config(Config *cfg);
+#+end_src
+
+/Error Handling:/
+- Check all allocations for NULL
+- On allocation failure: Log error, cleanup, exit
+
+---
+
+** 14. Build Configuration
+
+*/ 14.1 CMakeLists.txt
+
+#+begin_src cmake
+cmake_minimum_required(VERSION 3.20)
+project(statement-processor VERSION 1.0.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Find required libraries
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CURL REQUIRED libcurl)
+pkg_check_modules(XLSXWRITER REQUIRED libxlsxwriter)
+pkg_check_modules(LIBCONFIG REQUIRED libconfig)
+pkg_check_modules(CJSON REQUIRED libcjson)
+pkg_check_modules(PCRE2 REQUIRED libpcre2-8)
+
+# Source files
+set(SOURCES
+    src/main.c
+    src/config.c
+    src/paperless_api.c
+    src/parsers/cba_parser.c
+    src/parsers/anz_parser.c
+    src/parsers/parser_registry.c
+    src/categorizer.c
+    src/xlsx_writer.c
+    src/transaction.c
+    src/utils.c
+)
+
+# Main executable
+add_executable(statement-processor ${SOURCES})
+
+target_include_directories(statement-processor PRIVATE
+    ${CURL_INCLUDE_DIRS}
+    ${XLSXWRITER_INCLUDE_DIRS}
+    ${LIBCONFIG_INCLUDE_DIRS}
+    ${CJSON_INCLUDE_DIRS}
+    ${PCRE2_INCLUDE_DIRS}
+)
+
+target_link_libraries(statement-processor
+    ${CURL_LIBRARIES}
+    ${XLSXWRITER_LIBRARIES}
+    ${LIBCONFIG_LIBRARIES}
+    ${CJSON_LIBRARIES}
+    ${PCRE2_LIBRARIES}
+)
+
+# Compiler warnings
+target_compile_options(statement-processor PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+
+# Installation
+install(TARGETS statement-processor DESTINATION bin)
+install(FILES examples/sm-proc.cfg 
+        DESTINATION share/statement-processor/examples)
+
+# Tests
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+#+end_src
+
+*/ 14.2 Nix Flake Updates
+
+Update the =my-c-lib= derivation in the flake:
+
+#+begin_src nix
+my-c-lib = pkgs.stdenv.mkDerivation {
+  pname = "statement-processor";
+  version = "0.1.0";
+
+  src = pkgs.lib.cleanSource ./statement-processor;
+
+  nativeBuildInputs = with pkgs; [
+    cmake
+    pkg-config
+  ];
+
+  buildInputs = with pkgs; [
+    curl
+    libxlsxwriter
+    libconfig
+    cjson
+    pcre2
+  ];
+
+  cmakeFlags = [
+    "-DCMAKE_BUILD_TYPE=Release"
+    "-DBUILD_TESTS=ON"
+  ];
+
+  installPhase = ''
+    mkdir -p $out/bin
+    mkdir -p $out/share/statement-processor/examples
+    
+    # Install executable
+    cp statement-processor $out/bin/
+    
+    # Install example config
+    cp ${./statement-processor/examples/sm-proc.cfg} \
+       $out/share/statement-processor/examples/
+  '';
+
+  doCheck = true;
+
+  meta = with pkgs.lib; {
+    description = "Bank statement processor for Paperless-ngx";
+    homepage = "https://github.com/user/statement-processor";
+    license = licenses.mit;
+    maintainers = [ ];
+    platforms = platforms.unix;
+  };
+};
+#+end_src
+
+Update apps section:
+#+begin_src nix
+apps = {
+  statement-processor = {
+    type = "app";
+    program = "${my-c-lib}/bin/statement-processor";
+  };
+  default = statement-processor;
+};
+#+end_src
+
+---
+
+* 15. Testing Plan
+
+*/ 15.1 Unit Tests
+
+/Test Framework:/ Use a simple C testing framework (e.g., Check, Unity, or custom)
+
+/Test Coverage:/
+
+1. /Configuration Parsing/ (=test_config.c=)
+   - Valid configuration file parsing
+   - Invalid syntax handling
+   - Missing default_category
+   - Empty categories array
+   - Regex compilation errors
+   - Config file not found (should succeed with defaults)
+
+2. /Date Parsing/ (=test_utils.c=)
+   - Valid ISO dates (2024-01-15)
+   - Invalid formats (DD/MM/YYYY, malformed)
+   - Boundary dates (leap years, month boundaries)
+   - Date comparison (date-from ≤ date-to validation)
+
+3. /CBA Parser/ (=test_cba_parser.c=)
+   - Account number extraction
+   - Statement period extraction
+   - Single-line transactions
+   - Multi-line transactions (with Card, Value Date)
+   - Debit detection (amount followed by '(')
+   - Credit detection (amount followed by '$')
+   - Year resolution across statement boundaries
+   - Malformed content handling
+
+4. /ANZ Parser/ (=test_anz_parser.c=)
+   - Account number extraction
+   - Transaction table parsing
+   - Debit/Credit detection (CR suffix)
+   - Date format parsing (DD/MM/YYYY)
+   - Transaction date appending to description
+   - Malformed content handling
+
+5. /Categorization
+
+/ (=test_categorizer.c=)
+   - Pattern matching (case-insensitive)
+   - First-match-wins behavior
+   - Default category fallback
+   - Special characters in descriptions
+   - UTF-8 character handling
+   - Empty description handling
+   - Regex error handling
+
+6. /Amount Parsing/ (=test_utils.c=)
+   - Decimal amounts (3.50, 68.42)
+   - Amounts with commas (3,705.42)
+   - Currency symbol stripping ($, etc.)
+   - Zero amounts
+   - Large amounts
+   - Negative amounts (if encountered)
+
+7. /Transaction Sorting/ (=test_transaction.c=)
+   - Date-based sorting (chronological)
+   - Multiple transactions same date
+   - Date parsing for sorting
+
+8. /XLSX Generation/ (=test_xlsx_writer.c=)
+   - File creation
+   - Header row formatting
+   - Data row population
+   - Column formatting (numbers, dates)
+   - Empty transaction list
+   - Large transaction lists (1000+ rows)
+
+// 15.2 Integration Tests
+
+/Test Framework:/ Shell scripts or Python scripts that invoke the binary
+
+/Test Scenarios:/
+
+1. /End-to-End Happy Path/
+   - Mock Paperless API (use local HTTP server)
+   - Provide sample documents with known content
+   - Verify XLSX output contains expected transactions
+   - Verify API calls made to tag documents
+   - Verify summary output
+
+2. /Configuration Scenarios/
+   - Run without config file
+   - Run with empty config
+   - Run with config containing syntax errors
+   - Run with various categorization rules
+
+3. /Date Range Filtering/
+   - Documents within range
+   - Documents outside range
+   - Boundary conditions (exact start/end dates)
+
+4. /Reprocess Flag/
+   - Without flag: exclude processed documents
+   - With flag: include processed documents
+
+5. /Error Scenarios/
+   - Invalid API credentials
+   - Network timeouts (simulate with mock server)
+   - API returning malformed JSON
+   - Missing tags in Paperless
+   - Disk full during XLSX creation
+   - Permission denied on output directory
+
+6. /Parser Coverage/
+   - Documents from CBA
+   - Documents from ANZ
+   - Documents from unknown institution
+   - Documents with missing correspondent
+   - Documents with unparseable content
+
+7. /File Overwrite/
+   - Existing file with 'y' response
+   - Existing file with 'n' response
+   - Non-existent file
+
+// 15.3 Test Data
+
+/Sample Documents/
+
+Create test fixtures with realistic content:
+
+#+begin_src 
+tests/fixtures/
+├── cba_statement_1.txt          # Single month, no year crossing
+├── cba_statement_2.txt          # Year boundary crossing
+├── cba_statement_3.txt          # Edge cases
+├── anz_statement_1.txt          # Standard transactions
+├── anz_statement_2.txt          # Transactions with different dates
+├── unknown_bank_statement.txt   # Unrecognized format
+└── malformed_statement.txt      # Corrupted/incomplete content
+#+end_src
+
+/Mock API Responses/
+
+Create JSON fixtures for Paperless API:
+
+#+begin_src 
+tests/fixtures/api/
+├── documents_list_page1.json    # First page of results
+├── documents_list_page2.json    # Second page
+├── documents_list_empty.json    # No results
+├── document_detail.json         # Single document response
+└── error_responses.json         # Various error scenarios
+#+end_src
+
+// 15.4 Manual Testing Checklist
+
+Before release, manually verify:
+
+- [ ] Environment variables loaded correctly
+- [ ] Help/usage message displays properly
+- [ ] Invalid arguments show appropriate errors
+- [ ] Progress logging is clear and informative
+- [ ] XLSX file opens in Excel/LibreOffice without errors
+- [ ] Dates display correctly in spreadsheet
+- [ ] Numbers format with 2 decimal places
+- [ ] URLs are clickable in spreadsheet
+- [ ] Transactions sorted chronologically
+- [ ] Categorization rules applied correctly
+- [ ] Document tagging visible in Paperless UI
+- [ ] Custom field populated in Paperless UI
+- [ ] Summary statistics accurate
+- [ ] Memory leaks checked with valgrind
+- [ ] Works on macOS (aarch64-darwin, x86_64-darwin)
+- [ ] Works on Linux (aarch64-linux, x86_64-linux)
+
+---
+
+- 16. Development Phases
+
+// 16.1 Phase 1: Foundation (Week 1)
+
+/Deliverables:/
+- Project structure setup
+- CMake configuration
+- Nix flake configuration
+- CLI argument parsing
+- Configuration file parsing (libconfig)
+- Logging infrastructure
+- Basic data structures
+
+/Testing:/
+- Unit tests for config parsing
+- Unit tests for CLI parsing
+- Build successfully with Nix
+
+// 16.2 Phase 2: API Integration (Week 2)
+
+/Deliverables:/
+- Paperless API client (libcurl)
+- Document query with pagination
+- JSON parsing (cjson)
+- Retry logic with exponential backoff
+- Document update/tagging
+- Environment variable handling
+
+/Testing:/
+- Integration tests with mock API server
+- Unit tests for retry logic
+- Error handling tests
+
+// 16.3 Phase 3: Statement Parsing (Week 3)
+
+/Deliverables:/
+- Parser interface and registry
+- CBA parser implementation
+- ANZ parser implementation
+- Account number extraction
+- Transaction data structures
+- Date parsing and normalization
+
+/Testing:/
+- Unit tests for each parser
+- Test with real statement samples
+- Edge case handling
+
+// 16.4 Phase 4: Categorization & XLSX (Week 4)
+
+/Deliverables:/
+- Transaction categorization (PCRE2)
+- XLSX file generation (libxlsxwriter)
+- File overwrite prompting
+- Transaction sorting
+- Column formatting
+
+/Testing:/
+- Unit tests for categorization
+- Unit tests for XLSX generation
+- Integration tests end-to-end
+
+// 16.5 Phase 5: Polish & Documentation (Week 5)
+
+/Deliverables:/
+- Error handling refinement
+- Summary reporting
+- Example configuration file
+- README documentation
+- User guide
+- Memory leak fixes
+
+/Testing:/
+- Full integration test suite
+- Manual testing checklist
+- Performance testing (large datasets)
+- Memory profiling (valgrind)
+
+---
+
+- 17. Documentation Requirements
+
+// 17.1 README.md
+
+Include:
+- Project overview
+- Requirements (Nix, environment variables)
+- Installation instructions (via Nix)
+- Quick start guide
+- Usage examples
+- Configuration file format
+- Supported institutions
+- Troubleshooting
+
+// 17.2 Example Configuration File
+
+=examples/sm-proc.cfg=:
+
+#+begin_src c
+# Statement Processor Configuration
+# This file configures transaction categorization rules
+
+# Default category for transactions that don't match any pattern
+default_category = "Uncategorized";
+
+# Categorization rules
+# Rules are evaluated in order - first match wins
+# Patterns are case-insensitive regular expressions
+categories = (
+  # Groceries & Supermarkets
+  { 
+    pattern = "COLES|WOOLWORTHS|ALDI|IGA|SUPERMARKET|GROCERY"; 
+    category = "Groceries"; 
+  },
+  
+  # Dining & Food
+  { 
+    pattern = "RESTAURANT|CAFE|COFFEE|MCDONALD|KFC|HUNGRY JACK|UBER EATS|MENULOG|DELIVEROO"; 
+    category = "Dining"; 
+  },
+  
+  # Transport
+  { 
+    pattern = "FUEL|PETROL|BP|SHELL|CALTEX|AMPOL|UBER|TAXI|PUBLIC TRANSPORT|OPAL"; 
+    category = "Transport"; 
+  },
+  
+  # Utilities
+  { 
+    pattern = "ELECTRICITY|GAS|WATER|INTERNET|TELSTRA|OPTUS|VODAFONE|MOBILE|PHONE"; 
+    category = "Utilities"; 
+  },
+  
+  # Entertainment
+  { 
+    pattern = "NETFLIX|SPOTIFY|DISNEY|STAN|CINEMA|MOVIE|THEATRE"; 
+    category = "Entertainment"; 
+  },
+  
+  # Healthcare
+  { 
+    pattern = "PHARMACY|CHEMIST|DOCTOR|MEDICAL|HEALTH|DENTIST"; 
+    category = "Healthcare"; 
+  },
+  
+  # Shopping
+  { 
+    pattern = "AMAZON|EBAY|TARGET|KMART|MYER|DAVID JONES"; 
+    category = "Shopping"; 
+  },
+  
+  # Income
+  { 
+    pattern = "SALARY|WAGE|PAYMENT.*RECEIVED|TRANSFER.*FROM"; 
+    category = "Income"; 
+  }
+);
+#+end_src
+
+// 17.3 Usage Guide
+
+=USAGE.md= should include:
+
+1. /Prerequisites/
+   - Paperless-ngx instance configured
+   - Documents tagged with "Accounts"
+   - API token generated
+   - Tag IDs and custom field ID obtained
+
+2. /Initial Setup/
+   #+begin_src bash
+   # Get tag IDs from Paperless
+   curl -H "Authorization: Token YOUR_TOKEN" \
+        https://paperless.example.com/api/tags/ | jq
+   
+   # Get custom field ID
+   curl -H "Authorization: Token YOUR_TOKEN" \
+        https://paperless.example.com/api/custom_fields/ | jq
+   
+   # Update hardcoded IDs in source code
+   # Edit src/config.h:
+   # #define TAG_ACCOUNTS_ID 123
+   # #define TAG_PROCESSED_ID 456
+   # #define FIELD_EXPENSE_REPORT_ID 789
+   #+end_src
+
+3. /Running the Application/
+   #+begin_src bash
+   # Set environment variables
+   export PAPERLESS_URL="https://paperless.example.com"
+   export PAPERLESS_API_KEY="your-api-token-here"
+   
+   # Run for a specific month
+   nix run ./c#statement-processor -- \
+     --date-from 2024-01-01 \
+     --date-to 2024-01-31 \
+     -c sm-proc.cfg
+   
+   # Output to specific directory
+   nix run ./c#statement-processor -- \
+     --date-from 2024-01-01 \
+     --date-to 2024-01-31 \
+     -c sm-proc.cfg \
+     -o ~/reports/
+   
+   # Reprocess already processed documents
+   nix run ./c#statement-processor -- \
+     --date-from 2024-01-01 \
+     --date-to 2024-01-31 \
+     --reprocess
+   #+end_src
+
+4. /Troubleshooting Common Issues/
+   - API authentication failures
+   - Missing tags or custom fields
+   - Unparseable documents
+   - Network connectivity issues
+   - Permission errors
+
+5. /Adding New Institution Parsers/
+   - Parser implementation guidelines
+   - Testing new parsers
+   - Contributing back to project
+
+---
+
+- 18. Security Considerations
+
+// 18.1 API Credentials
+
+- API token should be in environment variable only (not config file)
+- Never log API token in output
+- Secure communication (HTTPS) enforced
+- No credentials stored on disk
+
+// 18.2 File Handling
+
+- Validate output directory path (prevent path traversal)
+- Check file permissions before writing
+- No temporary files with sensitive data
+- Clean up on error conditions
+
+// 18.3 Input Validation
+
+- Validate all API responses before parsing
+- Sanitize strings before regex matching
+- Bounds checking on all array accesses
+- Validate date ranges
+
+// 18.4 Memory Safety
+
+- Check all allocations
+- Free all allocated memory
+- No buffer overflows (use safe string functions)
+- Valgrind clean (no memory leaks)
+
+---
+
+- 19. Performance Considerations
+
+// 19.1 Expected Scale
+
+- Documents per month: 10-100
+- Transactions per document: 10-200
+- Total transactions per run: 100-5000
+- API response sizes: KB to MB
+
+// 19.2 Optimization Strategies
+
+- Compile regexes once at startup
+- Reuse cURL handles
+- Stream large API responses
+- Efficient transaction sorting (qsort)
+- Minimize memory allocations
+
+// 19.3 Performance Targets
+
+- Process 100 documents in < 30 seconds
+- Memory usage < 100MB
+- API calls complete in < 10 seconds total
+- XLSX generation < 5 seconds
+
+---
+
+- 20. Future Enhancements
+
+// 20.1 Potential Features (Not in v1.0)
+
+- Additional institution parsers (NAB, Westpac, etc.)
+- PDF parsing fallback (when content field unavailable)
+- Multiple output formats (CSV, JSON)
+- Transaction deduplication
+- Split transactions (one transaction → multiple categories)
+- Budget tracking and alerts
+- Multi-currency support
+- Interactive mode for categorization
+- Web UI for configuration
+- Scheduled/automated runs
+- Email report delivery
+
+// 20.2 Architecture for Extensibility
+
+- Parser registry makes adding institutions straightforward
+- Config file format can be extended
+- Modular code structure allows feature additions
+- API client abstraction allows switching backends
+
+---
+
+- 21. Acceptance Criteria
+
+The application is considered complete when:
+
+- [ ] Builds successfully with Nix on all target platforms
+- [ ] All unit tests pass
+- [ ] All integration tests pass
+- [ ] Manual testing checklist complete
+- [ ] Valgrind reports no memory leaks
+- [ ] Documentation complete (README, USAGE, example config)
+- [ ] Can process CBA statements correctly
+- [ ] Can process ANZ statements correctly
+- [ ] Correctly categorizes transactions based on config
+- [ ] Generates valid XLSX files
+- [ ] Tags documents in Paperless correctly
+- [ ] Handles all specified error conditions gracefully
+- [ ] Logging output is clear and informative
+- [ ] Summary statistics are accurate
+
+---
+
+- 22. API Reference
+
+// 22.1 Paperless API Endpoints Used
+
+/Get Documents:/
+#+begin_src 
+GET /api/documents/
+Query Parameters:
+  - tags__id__all: Comma-separated tag IDs
+  - tags__id__all__exclude: Comma-separated tag IDs to exclude
+  - created__date__gte: ISO date (YYYY-MM-DD)
+  - created__date__lte: ISO date (YYYY-MM-DD)
+  - page: Page number for pagination
+
+Response:
+{
+  "count": 23,
+  "next": "http://...",
+  "previous": null,
+  "results": [
+    {
+      "id": 12345,
+      "correspondent": 1,
+      "correspondent_name": "CBA",
+      "content": "...",
+      "created": "2024-01-15",
+      "tags": [1, 2],
+      ...
+    }
+  ]
+}
+#+end_src
+
+/Update Document:/
+#+begin_src 
+PATCH /api/documents/{id}/
+Request Body:
+{
+  "tags": [1, 2, 3],
+  "custom_fields": [
+    {
+      "field": 1,
+      "value": "2024-01-01-2024-01-31"
+    }
+  ]
+}
+
+Response:
+{
+  "id": 12345,
+  "tags": [1, 2, 3],
+  "custom_fields": [...],
+  ...
+}
+#+end_src
+
+// 22.2 Configuration File API
+
+/Structure:/
+#+begin_src c
+default_category = "string";
+
+categories = (
+  {
+    pattern = "regex_string";
+    category = "string";
+  },
+  ...
+);
+#+end_src
+
+/Validation Rules:/
+- =default_category= must be non-empty string
+- =categories= must be array (can be empty)
+- Each category entry must have =pattern= and =category= fields
+- =pattern= must be valid PCRE2 regex
+- =category= must be non-empty string
+
+---
+
+- 23. Constants and Hardcoded Values
+
+#+begin_src c
+// Paperless Configuration
+#define TAG_ACCOUNTS_ID 123              // "Accounts" tag
+#define TAG_PROCESSED_ID 456             // "processed" tag
+#define FIELD_EXPENSE_REPORT_ID 789      // "Expense Report" custom field
+
+// API Configuration
+#define API_TIMEOUT_SECONDS 30
+#define API_MAX_RETRIES 3
+#define API_RETRY
+
+

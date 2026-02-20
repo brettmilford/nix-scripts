@@ -1,0 +1,41 @@
+{
+  "account_number": "12 3456 78901234",
+  "statement_period": "1 May 2025 - 31 Oct 2025",
+  "transactions": [
+    {
+      "date": "2025-06-30",
+      "description": "Salary ACME CORPORATION",
+      "debit": null,
+      "credit": 5000.00,
+      "balance": 5000.00
+    },
+    {
+      "date": "2025-07-04",
+      "description": "Direct Credit ATO REF123456789",
+      "debit": null,
+      "credit": 1200.50,
+      "balance": 6200.50
+    },
+    {
+      "date": "2025-07-04",
+      "description": "Transfer To Test Person CommBank App Payment",
+      "debit": 445.50,
+      "credit": null,
+      "balance": 5755.00
+    },
+    {
+      "date": "2025-07-16",
+      "description": "Transfer To Example User CommBank App Mortgage",
+      "debit": 2000.00,
+      "credit": null,
+      "balance": 3755.00
+    },
+    {
+      "date": "2025-07-17",
+      "description": "ANZ CARDS CommBank app BPAY Credit Card Payment",
+      "debit": 956.42,
+      "credit": null,
+      "balance": 2798.58
+    }
+  ]
+}

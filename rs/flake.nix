@@ -58,7 +58,7 @@
 
           # Executed by `nix run .#<name>` (. for default)
           apps = {
-            default = {
+            paperless-to-spreadsheet = {
               type = "app";
               program = "${paperless-to-spreadsheet}/bin/paperless-to-spreadsheet";
             };
