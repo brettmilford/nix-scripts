@@ -12,6 +12,8 @@
     rsFlake.inputs.nixpkgs.follows = "nixpkgs";
     cFlake.url ="path:./c";
     cFlake.inputs.nixpkgs.follows = "nixpkgs";
+    goFlake.url ="path:./go";
+    goFlake.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -22,6 +24,7 @@
       pyFlake,
       rsFlake,
       cFlake,
+      goFlake,
     }:
     let
       systems = [
@@ -54,7 +57,9 @@
           packages = {
             default = help-script;
           }
-          // rsFlake.packages.${system};
+          // rsFlake.packages.${system}
+          // cFlake.packages.${system}
+          // goFlake.packages.${system};
 
           # Executed by `nix run .#<name>` (. for default)
           apps = {
@@ -66,7 +71,8 @@
           // rsFlake.apps.${system}
           // pyFlake.apps.${system}
           // shFlake.apps.${system}
-          // cFlake.apps.${system};
+          // cFlake.apps.${system}
+          // goFlake.apps.${system};
 
           # Executed by `nix develop .#<name>` (. for default)
           devShells =
@@ -84,7 +90,8 @@
             // rsFlake.devShells.${system}
             // pyFlake.devShells.${system}
             // shFlake.devShells.${system}
-            // cFlake.devShells.${system};
+            // cFlake.devShells.${system}
+            // goFlake.devShells.${system};
         };
     in
     {

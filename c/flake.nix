@@ -86,6 +86,7 @@
               program = "${sm-proc}/bin/sm-proc";
             };
           };
+
           devShells = {
             c = pkgs.mkShell {
               buildInputs = with pkgs; [
