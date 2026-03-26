@@ -37,6 +37,11 @@
             libraries = with pkgs.python3Packages; [ requests ];
             flakeIgnore = [ "E501" ];
           } (builtins.readFile ./immich-download-trashed.py);
+
+          domain-check = pkgs.writers.writePython3 "domain-check" {
+            libraries = with pkgs.python3Packages; [ python-whois ];
+            flakeIgnore = [ "E501" ];
+          } (builtins.readFile ./domain-check.py);
         in
         {
           apps = {
@@ -47,6 +52,10 @@
             immich-download-trashed = {
               type = "app";
               program = "${immich-download-trashed}";
+            };
+            domain-check = {
+              type = "app";
+              program = "${domain-check}";
             };
           };
 
