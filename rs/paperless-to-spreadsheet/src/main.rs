@@ -187,6 +187,7 @@ async fn create_share_link(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let with_links = args.with_links;
 
     // Check if financial year was provided
     let fy = match args.financial_year {
@@ -271,7 +272,7 @@ async fn main() -> Result<()> {
     println!("Filtered to {} documents for FY {}", filtered_documents.len(), fy);
 
     // Step 6: Separate documents into work expenses and investment property
-    let (mut work_expenses, mut investment_property) = separate_documents_by_tag(filtered_documents, ip_tag_id, &correspondents, &document_types, base_url, &client, &api_key).await?;
+    let (mut work_expenses, mut investment_property) = separate_documents_by_tag(filtered_documents, ip_tag_id, &correspondents, &document_types, base_url, &client, &api_key, with_links).await?;
 
     // Step 7: Sort documents with Statements first
     sort_documents_by_type(&mut work_expenses);
@@ -282,7 +283,7 @@ async fn main() -> Result<()> {
 
     // Step 8: Create Excel spreadsheet with two worksheets
     let filename = format!("FY{} Documents.xlsx", fy);
-    create_excel_file_with_worksheets(&work_expenses, &investment_property, &filename)?;
+    create_excel_file_with_worksheets(&work_expenses, &investment_property, &filename, with_links)?;
 
     println!("Successfully created {}", filename);
 
@@ -465,12 +466,13 @@ async fn separate_documents_by_tag(
     base_url: &str,
     client: &Client,
     api_key: &str,
+    with_links: bool,
 ) -> Result<(Vec<InvoiceData>, Vec<InvoiceData>)> {
     let mut work_expenses = Vec::new();
     let mut investment_property = Vec::new();
 
     for doc in documents {
-        let invoice_data = process_single_document(doc, correspondents, document_types, base_url, client, api_key).await?;
+        let invoice_data = process_single_document(doc, correspondents, document_types, base_url, client, api_key, with_links).await?;
 
         // Check if document has IP tag
         if let Some(ip_id) = ip_tag_id {
@@ -495,6 +497,7 @@ async fn process_single_document(
     base_url: &str,
     client: &Client,
     api_key: &str,
+    with_links: bool,
 ) -> Result<(Document, InvoiceData)> {
     // Extract custom field values
     let mut custom_values: HashMap<u32, String> = HashMap::new();
@@ -545,18 +548,20 @@ async fn process_single_document(
         parse_amount_and_currency(raw_amount)
     };
 
-    // Create share link
-    println!("Creating share link for document: {}", doc.title);
-    let share_link = match create_share_link(client, base_url, api_key, doc.id).await {
-        Ok(link) => link,
-        Err(e) => {
-            eprintln!("Warning: Failed to create share link for document {}: {}", doc.id, e);
-            String::new() // Use empty string if share link creation fails
-        }
+    let (share_link, link) = if with_links {
+        println!("Creating share link for document: {}", doc.title);
+        let sl = match create_share_link(client, base_url, api_key, doc.id).await {
+            Ok(link) => link,
+            Err(e) => {
+                eprintln!("Warning: Failed to create share link for document {}: {}", doc.id, e);
+                String::new()
+            }
+        };
+        let dl = format!("{}/documents/{}", base_url, doc.id);
+        (sl, dl)
+    } else {
+        (String::new(), String::new())
     };
-
-    // Create link to paperless document
-    let link = format!("{}/documents/{}", base_url, doc.id);
 
     // Notes column is empty
     let notes = String::new();
@@ -592,7 +597,8 @@ fn sort_documents_by_type(documents: &mut Vec<InvoiceData>) {
 fn create_worksheet(
     workbook: &mut Workbook,
     data: &[InvoiceData],
-    worksheet_name: &str
+    worksheet_name: &str,
+    with_links: bool,
 ) -> Result<()> {
     let worksheet = workbook.add_worksheet().set_name(worksheet_name)?;
 
@@ -601,13 +607,15 @@ fn create_worksheet(
         .set_bold()
         .set_background_color(Color::RGB(0xD3D3D3));
 
-    // Write headers - Title, Counterparty, Date, Type, Amount, Currency, Notes, Share Link, Link
-    let headers = ["Title", "Counterparty", "Date", "Type", "Amount", "Currency", "Notes", "Share Link", "Link"];
-    for (col, &header) in headers.iter().enumerate() {
-        worksheet.write_string_with_format(0, col as u16, header, &header_format)?;
+    let headers = if with_links {
+        vec!["Title", "Counterparty", "Date", "Type", "Amount", "Currency", "Notes", "Share Link", "Link"]
+    } else {
+        vec!["Title", "Counterparty", "Date", "Type", "Amount", "Currency", "Notes"]
+    };
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_string_with_format(0, col as u16, *header, &header_format)?;
     }
 
-    // Write data
     for (row, invoice) in data.iter().enumerate() {
         let row_num = (row + 1) as u32;
         worksheet.write_string(row_num, 0, &invoice.title)?;
@@ -617,10 +625,12 @@ fn create_worksheet(
         worksheet.write_string(row_num, 4, &invoice.amount)?;
         worksheet.write_string(row_num, 5, &invoice.currency)?;
         worksheet.write_string(row_num, 6, &invoice.notes)?;
-        if !invoice.share_link.is_empty() {
-            worksheet.write_url_with_text(row_num, 7, Url::new(&invoice.share_link), "Share Link")?;
+        if with_links {
+            if !invoice.share_link.is_empty() {
+                worksheet.write_url_with_text(row_num, 7, Url::new(&invoice.share_link), "Share Link")?;
+            }
+            worksheet.write_url_with_text(row_num, 8, Url::new(&invoice.link), "Link")?;
         }
-        worksheet.write_url_with_text(row_num, 8, Url::new(&invoice.link), "Link")?;
     }
 
     // Auto-fit columns
@@ -632,16 +642,15 @@ fn create_worksheet(
 fn create_excel_file_with_worksheets(
     work_expenses: &[InvoiceData],
     investment_property: &[InvoiceData],
-    filename: &str
+    filename: &str,
+    with_links: bool,
 ) -> Result<()> {
     let mut workbook = Workbook::new();
 
-    // Create Work Expenses worksheet
-    create_worksheet(&mut workbook, work_expenses, "Work Expenses")?;
+    create_worksheet(&mut workbook, work_expenses, "Work Expenses", with_links)?;
 
-    // Create Investment Property worksheet (only if there are IP documents)
     if !investment_property.is_empty() {
-        create_worksheet(&mut workbook, investment_property, "Investment Property")?;
+        create_worksheet(&mut workbook, investment_property, "Investment Property", with_links)?;
     }
 
     workbook.save(filename)?;
