@@ -16,6 +16,10 @@ use rust_xlsxwriter::{Workbook, Format, Color, Formula, Url};
 struct Args {
     /// Financial Year (e.g., 2025)
     financial_year: Option<String>,
+
+    /// Include Paperless share links and document links in the spreadsheet
+    #[arg(long)]
+    with_links: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -642,4 +646,24 @@ fn create_excel_file_with_worksheets(
 
     workbook.save(filename)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn args_default_no_links() {
+        let args = Args::parse_from(["paperless-to-spreadsheet", "2025"]);
+        assert_eq!(args.financial_year, Some("2025".to_string()));
+        assert!(!args.with_links);
+    }
+
+    #[test]
+    fn args_with_links_flag() {
+        let args = Args::parse_from(["paperless-to-spreadsheet", "--with-links", "2025"]);
+        assert_eq!(args.financial_year, Some("2025".to_string()));
+        assert!(args.with_links);
+    }
 }
