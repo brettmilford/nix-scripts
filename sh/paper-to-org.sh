@@ -38,7 +38,7 @@ Rules:
 - Keep the structure (headings, the quoted line, paragraph breaks)
 - Output only the markdown, no preamble or commentary" "${page_args[@]}" > "$tmpdir/output.md"
 
-pandoc -f markdown -t org "$tmpdir/output.md" -o "$tmpdir/output.org"
+pandoc -f markdown-auto_identifiers -t org "$tmpdir/output.md" -o "$tmpdir/output.org"
 
 uuid="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
