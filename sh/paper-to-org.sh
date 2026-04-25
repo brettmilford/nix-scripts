@@ -28,7 +28,7 @@ for img in "$tmpdir"/page-*.png; do
     page_args+=("$img")
 done
 
-claude -p --model opus --add-dir "$tmpdir" "Ultrathink. Carefully OCR the handwritten images to markdown.
+claude -p --model opus --add-dir "$tmpdir" --dangerously-skip-permissions "Ultrathink. Carefully OCR the handwritten images to markdown.
 
 Rules:
 - Transcribe character-by-character; do not normalise or \"improve\" wording
