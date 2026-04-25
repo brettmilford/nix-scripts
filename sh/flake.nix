@@ -39,6 +39,16 @@
             ];
             text = builtins.readFile ./test-fail2ban.sh;
           };
+          paper-to-org = pkgs.writeShellApplication {
+            name = "paper-to-org";
+            runtimeInputs = with pkgs; [
+              poppler_utils
+              claude-code
+              pandoc
+              util-linux
+            ];
+            text = builtins.readFile ./paper-to-org.sh;
+          };
 
         in
         {
@@ -50,6 +60,10 @@
             test-fail2ban = {
               type = "app";
               program = "${test-fail2ban}/bin/test-fail2ban";
+            };
+            paper-to-org = {
+              type = "app";
+              program = "${paper-to-org}/bin/paper-to-org";
             };
           };
 
