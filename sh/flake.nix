@@ -26,7 +26,12 @@
       mkSystemOutputs =
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) [
+              "claude-code"
+            ];
+          };
           compare-dirs = pkgs.writeShellApplication {
             name = "compare-dirs";
             text = builtins.readFile ./compare-dirs.sh;
