@@ -47,7 +47,7 @@
           paper-to-org = pkgs.writeShellApplication {
             name = "paper-to-org";
             runtimeInputs = with pkgs; [
-              poppler_utils
+              poppler-utils
               claude-code
               pandoc
               util-linux
